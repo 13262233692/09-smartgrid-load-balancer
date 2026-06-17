@@ -5,7 +5,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, onBeforeUnmount, onMounted, watch, nextTick, markRaw } from 'vue'
 import * as d3 from 'd3'
 
 const props = defineProps({
@@ -21,13 +21,24 @@ const containerRef = ref(null)
 const svgRef = ref(null)
 
 let svg = null
+let gRoot = null
 let gLinks = null
 let gFlowParticles = null
 let gNodes = null
 let zoomBehavior = null
 let animationTimer = null
+let resizeObserver = null
 let width = 0
 let height = 0
+let isDestroyed = false
+
+const cleanupRegistry = {
+  nodeClickListeners: new Map(),
+  nodePulseTransitions: new Map(),
+  activeTransitions: new Set(),
+  zoomHandler: null,
+  svgNode: null
+}
 
 const typeColors = {
   grid: '#3b82f6',
@@ -35,6 +46,107 @@ const typeColors = {
   inverter: '#22c55e',
   load: '#f97316',
   battery: '#06b6d4'
+}
+
+function trackTransition(transition) {
+  if (!transition) return
+  cleanupRegistry.activeTransitions.add(transition)
+  transition.on('end.cleanup', () => {
+    cleanupRegistry.activeTransitions.delete(transition)
+  }).on('interrupt.cleanup', () => {
+    cleanupRegistry.activeTransitions.delete(transition)
+  })
+  return transition
+}
+
+function cancelAllTransitions() {
+  cleanupRegistry.activeTransitions.forEach(t => {
+    try { t.stop() } catch (_) {}
+  })
+  cleanupRegistry.activeTransitions.clear()
+
+  cleanupRegistry.nodePulseTransitions.forEach(({ selection }) => {
+    try {
+      if (selection && selection.interrupt) {
+        selection.interrupt()
+      }
+    } catch (_) {}
+  })
+  cleanupRegistry.nodePulseTransitions.clear()
+}
+
+function removeDOMElements() {
+  if (gFlowParticles) {
+    try {
+      gFlowParticles.selectAll('*').interrupt().remove()
+    } catch (_) {}
+  }
+  if (gNodes) {
+    try {
+      gNodes.selectAll('*').interrupt().on('click', null).remove()
+    } catch (_) {}
+  }
+  if (gLinks) {
+    try {
+      gLinks.selectAll('*').interrupt().remove()
+    } catch (_) {}
+  }
+  if (gRoot) {
+    try { gRoot.selectAll('*').interrupt().remove() } catch (_) {}
+  }
+}
+
+function detachZoom() {
+  if (svg && zoomBehavior) {
+    try {
+      svg.on('.zoom', null)
+      svg.call(zoomBehavior)
+    } catch (_) {}
+    zoomBehavior = null
+  }
+  cleanupRegistry.zoomHandler = null
+}
+
+function detachEventListeners() {
+  cleanupRegistry.nodeClickListeners.forEach(({ group, handler }) => {
+    try {
+      if (group && group.on) {
+        group.on('click', null)
+      }
+    } catch (_) {}
+  })
+  cleanupRegistry.nodeClickListeners.clear()
+}
+
+function destroyAllResources() {
+  if (isDestroyed) return
+  isDestroyed = true
+
+  if (animationTimer) {
+    try { animationTimer.stop() } catch (_) {}
+    animationTimer = null
+  }
+
+  if (resizeObserver) {
+    try { resizeObserver.disconnect() } catch (_) {}
+    resizeObserver = null
+  }
+
+  cancelAllTransitions()
+  detachEventListeners()
+  detachZoom()
+  removeDOMElements()
+
+  if (svg) {
+    try { svg.selectAll('*').remove() } catch (_) {}
+    svg = null
+  }
+
+  cleanupRegistry.svgNode = null
+  gRoot = null
+  gLinks = null
+  gFlowParticles = null
+  gNodes = null
 }
 
 function getLoadColor(loadRate) {
@@ -60,8 +172,44 @@ function getPulseDuration(loadRate) {
   return 3500
 }
 
+function getNodeRadius(type) {
+  switch (type) {
+    case 'grid': return 32
+    case 'substation': return 26
+    case 'battery': return 24
+    case 'inverter': return 22
+    case 'load': return 20
+    default: return 20
+  }
+}
+
+function getNodeIcon(type) {
+  switch (type) {
+    case 'grid': return '⚡'
+    case 'substation': return '🏭'
+    case 'inverter': return '☀️'
+    case 'load': return '🏠'
+    case 'battery': return '🔋'
+    default: return '⬤'
+  }
+}
+
+function handleNodeClickFactory(nodeData) {
+  const handler = (event) => {
+    if (isDestroyed) return
+    emit('node-click', nodeData)
+    if (event && event.stopPropagation) {
+      event.stopPropagation()
+    }
+  }
+  return markRaw(handler)
+}
+
 function initSVG() {
   if (!svgRef.value || !containerRef.value) return
+
+  destroyAllResources()
+  isDestroyed = false
 
   const container = containerRef.value
   width = container.clientWidth
@@ -71,6 +219,8 @@ function initSVG() {
     .attr('width', width)
     .attr('height', height)
     .attr('viewBox', [0, 0, width, height])
+
+  cleanupRegistry.svgNode = svgRef.value
 
   svg.selectAll('*').remove()
 
@@ -120,14 +270,17 @@ function initSVG() {
     .attr('height', height)
     .attr('fill', 'url(#grid-pattern)')
 
-  const gRoot = svg.append('g').attr('class', 'root')
+  gRoot = svg.append('g').attr('class', 'root')
 
   zoomBehavior = d3.zoom()
     .scaleExtent([0.3, 3])
-    .on('zoom', (event) => {
-      gRoot.attr('transform', event.transform)
-    })
 
+  cleanupRegistry.zoomHandler = function(event) {
+    if (isDestroyed || !gRoot) return
+    gRoot.attr('transform', event.transform)
+  }
+
+  zoomBehavior.on('zoom', cleanupRegistry.zoomHandler)
   svg.call(zoomBehavior)
 
   gLinks = gRoot.append('g').attr('class', 'links')
@@ -137,6 +290,8 @@ function initSVG() {
 
 function renderLinks() {
   if (!gLinks || props.links.length === 0) return
+
+  detachEventListeners()
 
   const nodeMap = new Map(props.nodes.map(n => [n.id, n]))
 
@@ -148,6 +303,10 @@ function renderLinks() {
 
   const selection = gLinks.selectAll('g.link-group')
     .data(linkData, d => `${d.source.id}-${d.target.id}`)
+
+  selection.exit().each(function() {
+    d3.select(this).selectAll('*').interrupt()
+  }).remove()
 
   const linkGroupEnter = selection.enter().append('g').attr('class', 'link-group')
 
@@ -171,23 +330,44 @@ function renderLinks() {
     .attr('y1', d => d.source.y)
     .attr('x2', d => d.target.x)
     .attr('y2', d => d.target.y)
-
-  selection.exit().remove()
 }
 
 function renderNodes() {
   if (!gNodes || props.nodes.length === 0) return
 
+  cancelAllTransitions()
+
+  cleanupRegistry.nodeClickListeners.forEach(({ group }) => {
+    try { group.on('click', null) } catch (_) {}
+  })
+  cleanupRegistry.nodeClickListeners.clear()
+
   const selection = gNodes.selectAll('g.node-group')
     .data(props.nodes, d => d.id)
+
+  selection.exit().each(function(d) {
+    const nodeId = d && d.id
+    if (nodeId && cleanupRegistry.nodePulseTransitions.has(nodeId)) {
+      const entry = cleanupRegistry.nodePulseTransitions.get(nodeId)
+      try {
+        entry.selection.interrupt()
+        entry._destroyed = true
+      } catch (_) {}
+      cleanupRegistry.nodePulseTransitions.delete(nodeId)
+    }
+    d3.select(this).selectAll('*').interrupt().on('click', null)
+  }).remove()
 
   const nodeGroupEnter = selection.enter().append('g')
     .attr('class', 'node-group')
     .style('cursor', 'pointer')
-    .on('click', (event, d) => {
-      emit('node-click', d)
-      event.stopPropagation()
-    })
+
+  nodeGroupEnter.each(function(d) {
+    const group = d3.select(this)
+    const handler = handleNodeClickFactory(d)
+    group.on('click', handler)
+    cleanupRegistry.nodeClickListeners.set(d.id, { group, handler })
+  })
 
   nodeGroupEnter.append('circle')
     .attr('class', 'node-pulse')
@@ -240,66 +420,63 @@ function renderNodes() {
 
   updateNodeStyles()
   startNodeAnimations()
-
-  selection.exit().remove()
-}
-
-function getNodeRadius(type) {
-  switch (type) {
-    case 'grid': return 32
-    case 'substation': return 26
-    case 'battery': return 24
-    case 'inverter': return 22
-    case 'load': return 20
-    default: return 20
-  }
-}
-
-function getNodeIcon(type) {
-  switch (type) {
-    case 'grid': return '⚡'
-    case 'substation': return '🏭'
-    case 'inverter': return '☀️'
-    case 'load': return '🏠'
-    case 'battery': return '🔋'
-    default: return '⬤'
-  }
 }
 
 function updateNodeStyles() {
-  if (!gNodes) return
+  if (!gNodes || isDestroyed) return
 
   gNodes.selectAll('g.node-group').each(function(d) {
+    if (isDestroyed) return
     const g = d3.select(this)
     const loadData = props.loadRates[d.id]
     const loadRate = loadData ? loadData.loadRate : 0.3
     const color = getLoadColor(loadRate)
 
-    g.select('.node-circle')
-      .transition()
-      .duration(400)
-      .attr('fill', color)
+    trackTransition(
+      g.select('.node-circle')
+        .transition()
+        .duration(400)
+        .attr('fill', color)
+    )
 
-    g.select('.node-glow')
-      .transition()
-      .duration(400)
-      .attr('fill', color)
+    trackTransition(
+      g.select('.node-glow')
+        .transition()
+        .duration(400)
+        .attr('fill', color)
+    )
 
     g.select('.node-pulse')
       .attr('stroke', color)
 
     g.select('.node-load-label')
       .text(loadData ? `${(loadRate * 100).toFixed(1)}%` : '--')
-      .transition()
-      .duration(400)
-      .attr('fill', color)
+
+    trackTransition(
+      g.select('.node-load-label')
+        .transition()
+        .duration(400)
+        .attr('fill', color)
+    )
   })
 }
 
 function startNodeAnimations() {
-  if (!gNodes) return
+  if (!gNodes || isDestroyed) return
+
+  cleanupRegistry.nodePulseTransitions.forEach((entry, nodeId) => {
+    try {
+      entry._destroyed = true
+      if (entry.selection && entry.selection.interrupt) {
+        entry.selection.interrupt()
+      }
+    } catch (_) {}
+  })
+  cleanupRegistry.nodePulseTransitions.clear()
 
   gNodes.selectAll('g.node-group').each(function(d) {
+    if (isDestroyed) return
+    const nodeId = d.id
     const g = d3.select(this)
     const pulse = g.select('.node-pulse')
     const loadData = props.loadRates[d.id]
@@ -307,18 +484,44 @@ function startNodeAnimations() {
     const duration = getPulseDuration(loadRate)
     const radius = getNodeRadius(d.type)
 
-    pulse.interrupt('pulse')
+    pulse.interrupt()
+
+    const entry = {
+      selection: pulse,
+      duration,
+      radius,
+      nodeId,
+      _destroyed: false,
+      _iteration: 0
+    }
+    cleanupRegistry.nodePulseTransitions.set(nodeId, entry)
 
     function animatePulse() {
-      pulse
-        .attr('r', radius + 4)
-        .attr('stroke-opacity', 0.8)
-        .transition('pulse')
-        .duration(duration)
-        .ease(d3.easeCubicOut)
-        .attr('r', radius + 20)
-        .attr('stroke-opacity', 0)
-        .on('end', animatePulse)
+      if (isDestroyed || entry._destroyed || !cleanupRegistry.nodePulseTransitions.has(nodeId)) {
+        return
+      }
+      entry._iteration++
+
+      try {
+        pulse
+          .attr('r', radius + 4)
+          .attr('stroke-opacity', 0.8)
+          .transition('pulse')
+          .duration(duration)
+          .ease(d3.easeCubicOut)
+          .attr('r', radius + 20)
+          .attr('stroke-opacity', 0)
+          .on('end', function() {
+            if (isDestroyed || entry._destroyed) return
+            if (cleanupRegistry.nodePulseTransitions.get(nodeId) === entry) {
+              animatePulse()
+            }
+          })
+      } catch (_) {
+        if (!isDestroyed && !entry._destroyed && cleanupRegistry.nodePulseTransitions.get(nodeId) === entry) {
+          setTimeout(animatePulse, duration)
+        }
+      }
     }
 
     animatePulse()
@@ -329,40 +532,52 @@ function startFlowAnimation() {
   if (!gFlowParticles || animationTimer) return
 
   animationTimer = d3.interval(() => {
-    if (!gLinks) return
+    if (!gLinks || isDestroyed) return
 
-    const flowMap = new Map()
-    props.flows.forEach(f => {
-      flowMap.set(`${f.source}-${f.target}`, f)
-      flowMap.set(`${f.target}-${f.source}`, { ...f, source: f.target, target: f.source, reversed: true })
-    })
+    try {
+      const flowMap = new Map()
+      props.flows.forEach(f => {
+        flowMap.set(`${f.source}-${f.target}`, f)
+        flowMap.set(`${f.target}-${f.source}`, { ...f, source: f.target, target: f.source, reversed: true })
+      })
 
-    const activeLinks = props.links
-      .map(l => flowMap.get(`${l.source}-${l.target}`) || { source: l.source, target: l.target, power: 0, capacity: l.capacity })
-      .filter(f => f.power > 0)
+      const activeLinks = props.links
+        .map(l => flowMap.get(`${l.source}-${l.target}`) || { source: l.source, target: l.target, power: 0, capacity: l.capacity })
+        .filter(f => f.power > 0)
 
-    const particles = activeLinks.flatMap(flow => {
-      const count = Math.max(1, Math.floor((flow.power / flow.capacity) * 5))
-      return Array.from({ length: count }, (_, i) => ({
-        id: `${flow.source}-${flow.target}-${i}-${Date.now() + Math.random()}`,
-        sourceNode: props.nodes.find(n => n.id === flow.source),
-        targetNode: props.nodes.find(n => n.id === flow.target),
-        offset: i / count,
-        powerRatio: flow.power / flow.capacity
-      }))
-    }).filter(p => p.sourceNode && p.targetNode)
+      const timestamp = Date.now()
+      const particles = activeLinks.flatMap(flow => {
+        const count = Math.max(1, Math.floor((flow.power / flow.capacity) * 5))
+        return Array.from({ length: count }, (_, i) => ({
+          id: `${flow.source}-${flow.target}-${i}-${timestamp}-${Math.random().toString(36).slice(2, 7)}`,
+          sourceNode: props.nodes.find(n => n.id === flow.source),
+          targetNode: props.nodes.find(n => n.id === flow.target),
+          offset: i / count,
+          powerRatio: flow.power / flow.capacity
+        }))
+      }).filter(p => p.sourceNode && p.targetNode)
 
-    const selection = gFlowParticles.selectAll('circle.flow-particle')
-      .data(particles, d => d.id)
+      if (isDestroyed) return
 
-    const enter = selection.enter().append('circle')
-      .attr('class', 'flow-particle')
-      .attr('r', 3)
-      .attr('fill', '#60a5fa')
-      .attr('filter', 'url(#glow)')
+      const existing = gFlowParticles.selectAll('circle.flow-particle')
+      existing.interrupt().each(function() {
+        const self = d3.select(this)
+        self.on('end', null).on('interrupt', null)
+      }).remove()
 
-    enter.merge(selection)
-      .each(function(d) {
+      const selection = gFlowParticles.selectAll('circle.flow-particle')
+        .data(particles, d => d.id)
+
+      selection.exit().interrupt().remove()
+
+      const enter = selection.enter().append('circle')
+        .attr('class', 'flow-particle')
+        .attr('r', 3)
+        .attr('fill', '#60a5fa')
+        .attr('filter', 'url(#glow)')
+
+      enter.each(function(d) {
+        if (isDestroyed) return
         const particle = d3.select(this)
         const sx = d.sourceNode.x
         const sy = d.sourceNode.y
@@ -371,54 +586,88 @@ function startFlowAnimation() {
         const duration = 2000 / Math.max(0.3, d.powerRatio)
         const delay = d.offset * duration
 
-        particle
-          .attr('cx', sx)
-          .attr('cy', sy)
-          .attr('fill-opacity', 0.9)
-          .attr('r', 2 + d.powerRatio * 3)
-          .transition()
-          .delay(delay)
-          .duration(duration)
-          .ease(d3.easeLinear)
-          .attrTween('cx', () => t => sx + (tx - sx) * t)
-          .attrTween('cy', () => t => sy + (ty - sy) * t)
-          .on('end', function() {
-            d3.select(this).remove()
-          })
-      })
+        let active = true
+        const cxTween = () => {
+          if (!active || isDestroyed) return sx
+          return t => sx + (tx - sx) * t
+        }
+        const cyTween = () => {
+          if (!active || isDestroyed) return sy
+          return t => sy + (ty - sy) * t
+        }
 
-    selection.exit().remove()
+        try {
+          trackTransition(
+            particle
+              .attr('cx', sx)
+              .attr('cy', sy)
+              .attr('fill-opacity', 0.9)
+              .attr('r', 2 + d.powerRatio * 3)
+              .transition()
+              .delay(delay)
+              .duration(duration)
+              .ease(d3.easeLinear)
+              .attrTween('cx', cxTween)
+              .attrTween('cy', cyTween)
+              .on('end', function() {
+                active = false
+                try { d3.select(this).remove() } catch (_) {}
+              })
+              .on('interrupt', function() {
+                active = false
+                try { d3.select(this).remove() } catch (_) {}
+              })
+          )
+        } catch (_) {
+          try { particle.remove() } catch (_) {}
+        }
+      })
+    } catch (err) {
+      if (!isDestroyed) console.warn('[FlowAnimation] 异常:', err.message)
+    }
   }, 1500)
 }
 
 function handleResize() {
-  if (!containerRef.value) return
+  if (!containerRef.value || isDestroyed) return
   width = containerRef.value.clientWidth
   height = containerRef.value.clientHeight
   if (svg) {
-    svg.attr('width', width).attr('height', height)
+    try {
+      svg.attr('width', width).attr('height', height)
+      svg.attr('viewBox', [0, 0, width, height])
+    } catch (_) {}
   }
 }
 
-let resizeObserver = null
+let topologyWatchReady = false
 
-watch(() => [props.nodes, props.links], () => {
+watch(() => [JSON.stringify(props.nodes), JSON.stringify(props.links)], () => {
+  if (isDestroyed) return
   nextTick(() => {
+    if (isDestroyed) return
+    if (!topologyWatchReady) {
+      topologyWatchReady = true
+      return
+    }
+    cancelAllTransitions()
     renderLinks()
     renderNodes()
   })
-}, { deep: true })
+}, { flush: 'post' })
 
+let loadRatesWatchCount = 0
 watch(() => props.loadRates, () => {
+  if (isDestroyed) return
+  loadRatesWatchCount++
+  if (loadRatesWatchCount === 1) return
   updateNodeStyles()
   startNodeAnimations()
-}, { deep: true })
-
-watch(() => props.flows, () => {
-}, { deep: true })
+}, { deep: true, flush: 'post' })
 
 onMounted(() => {
   nextTick(() => {
+    if (isDestroyed) isDestroyed = false
     initSVG()
     renderLinks()
     renderNodes()
@@ -431,15 +680,8 @@ onMounted(() => {
   }
 })
 
-onUnmounted(() => {
-  if (animationTimer) {
-    animationTimer.stop()
-    animationTimer = null
-  }
-  if (resizeObserver) {
-    resizeObserver.disconnect()
-    resizeObserver = null
-  }
+onBeforeUnmount(() => {
+  destroyAllResources()
 })
 </script>
 

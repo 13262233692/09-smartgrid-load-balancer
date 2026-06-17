@@ -63,6 +63,7 @@
 
       <main class="main-content">
         <TopologyGraph
+          :key="topologyGraphKey"
           :nodes="nodes"
           :links="links"
           :load-rates="loadRates"
@@ -132,7 +133,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted, markRaw } from 'vue'
 import TopologyGraph from './components/TopologyGraph.vue'
 import { useTopology } from './composables/useTopology.js'
 import { useWebSocket } from './composables/useWebSocket.js'
@@ -142,7 +143,9 @@ const { loadRates, flows, wsConnected, connectWebSocket, disconnectWebSocket } =
 
 const selectedNode = ref(null)
 const currentTime = ref('')
+const topologyGraphKey = ref(0)
 let timeTimer = null
+let timeUpdateFn = null
 
 const stats = computed(() => {
   const loadArr = Object.values(loadRates.value)
@@ -181,28 +184,55 @@ function selectNode(id) {
   if (node) selectedNode.value = node
 }
 
-function updateTime() {
-  const now = new Date()
-  currentTime.value = now.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
+function destroyTimeTimer() {
+  if (timeTimer) {
+    clearInterval(timeTimer)
+    timeTimer = null
+  }
+  timeUpdateFn = null
+}
+
+function createTimeUpdater() {
+  destroyTimeTimer()
+  timeUpdateFn = markRaw(function() {
+    const now = new Date()
+    currentTime.value = now.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    })
   })
+  if (timeUpdateFn) timeUpdateFn()
+  timeTimer = setInterval(() => {
+    if (timeUpdateFn) timeUpdateFn()
+  }, 1000)
 }
 
 onMounted(async () => {
   await fetchTopology()
+  topologyGraphKey.value++
   connectWebSocket()
-  updateTime()
-  timeTimer = setInterval(updateTime, 1000)
+  createTimeUpdater()
+
+  window.addEventListener('beforeunload', handleBeforeUnload)
 })
 
-onUnmounted(() => {
+function handleBeforeUnload() {
+  try {
+    disconnectWebSocket()
+    destroyTimeTimer()
+  } catch (_) {}
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
   disconnectWebSocket()
-  if (timeTimer) clearInterval(timeTimer)
+  destroyTimeTimer()
+  selectedNode.value = null
+  topologyGraphKey.value++
 })
 </script>
 
