@@ -107,4 +107,39 @@ function publishTestData() {
   })
 }
 
-export { initMQTT, publishTestData }
+function publishControlCommand(command) {
+  if (!client || !client.connected) {
+    console.warn(`[MQTT] 未连接，指令未下发: ${command?.nodeId}`)
+    return false
+  }
+
+  const { type, nodeId, action } = command || {}
+  if (!nodeId || !action) {
+    console.error('[MQTT] 无效的控制指令:', command)
+    return false
+  }
+
+  const topic = `smartgrid/control/${nodeId}`
+  const payload = JSON.stringify({
+    commandType: type || 'load_shed',
+    action,
+    nodeId,
+    issuedAt: new Date().toISOString(),
+    ...command
+  })
+
+  client.publish(topic, payload, { qos: 1, retain: false }, (err) => {
+    if (err) {
+      console.error(`[MQTT] 指令下发失败 [${topic}]:`, err.message)
+    } else {
+      console.log(`[MQTT] 指令已下发 [${topic}]: action=${action} node=${nodeId}`)
+    }
+  })
+  return true
+}
+
+function isMQTTConnected() {
+  return !!(client && client.connected)
+}
+
+export { initMQTT, publishTestData, publishControlCommand, isMQTTConnected }

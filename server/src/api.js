@@ -2,6 +2,9 @@ import express from 'express'
 import cors from 'cors'
 import { topology, nodeTypes } from './topology.js'
 import { getClientCount } from './websocket.js'
+import { getGuardianState } from './guardian.js'
+import { getSimulatorState, triggerIslandEvent, restoreGridEvent } from './simulator.js'
+import { isMQTTConnected } from './mqttClient.js'
 
 function initAPI(app) {
   app.use(cors())
@@ -11,7 +14,8 @@ function initAPI(app) {
     res.json({
       status: 'ok',
       timestamp: new Date().toISOString(),
-      wsClients: getClientCount()
+      wsClients: getClientCount(),
+      mqttConnected: isMQTTConnected()
     })
   })
 
@@ -44,6 +48,24 @@ function initAPI(app) {
 
   app.get('/api/node-types', (req, res) => {
     res.json(nodeTypes)
+  })
+
+  app.get('/api/guardian/state', (req, res) => {
+    res.json(getGuardianState())
+  })
+
+  app.get('/api/simulator/state', (req, res) => {
+    res.json(getSimulatorState())
+  })
+
+  app.post('/api/simulator/trigger-island', (req, res) => {
+    triggerIslandEvent()
+    res.json({ ok: true, message: '已手动触发孤岛模式' })
+  })
+
+  app.post('/api/simulator/restore-grid', (req, res) => {
+    restoreGridEvent()
+    res.json({ ok: true, message: '已手动恢复主电网' })
   })
 
   console.log('[API] REST API 已初始化')

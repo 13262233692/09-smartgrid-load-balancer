@@ -1,17 +1,63 @@
 const topology = {
   nodes: [
-    { id: 'GRID-001', name: '主电网', type: 'grid', x: 600, y: 100 },
-    { id: 'SUB-001', name: '1号变电站', type: 'substation', x: 300, y: 250 },
-    { id: 'SUB-002', name: '2号变电站', type: 'substation', x: 900, y: 250 },
-    { id: 'PV-001', name: '光伏阵列A', type: 'inverter', x: 150, y: 420 },
-    { id: 'PV-002', name: '光伏阵列B', type: 'inverter', x: 450, y: 420 },
-    { id: 'PV-003', name: '光伏阵列C', type: 'inverter', x: 750, y: 420 },
-    { id: 'PV-004', name: '光伏阵列D', type: 'inverter', x: 1050, y: 420 },
-    { id: 'LOAD-001', name: '工业负荷区1', type: 'load', x: 200, y: 580 },
-    { id: 'LOAD-002', name: '工业负荷区2', type: 'load', x: 500, y: 580 },
-    { id: 'LOAD-003', name: '商业负荷区', type: 'load', x: 800, y: 580 },
-    { id: 'LOAD-004', name: '居民负荷区', type: 'load', x: 1100, y: 580 },
-    { id: 'BATT-001', name: '储能站1', type: 'battery', x: 600, y: 420 }
+    {
+      id: 'GRID-001', name: '主电网', type: 'grid', x: 600, y: 100,
+      priority: 0, shedable: false, capacity: 0,
+      isMainGrid: true
+    },
+    {
+      id: 'SUB-001', name: '1号变电站', type: 'substation', x: 300, y: 250,
+      priority: 1, shedable: false, capacity: 800
+    },
+    {
+      id: 'SUB-002', name: '2号变电站', type: 'substation', x: 900, y: 250,
+      priority: 1, shedable: false, capacity: 800
+    },
+    {
+      id: 'PV-001', name: '光伏阵列A', type: 'inverter', x: 150, y: 420,
+      priority: 1, shedable: false, capacity: 400,
+      isGenerator: true
+    },
+    {
+      id: 'PV-002', name: '光伏阵列B', type: 'inverter', x: 450, y: 420,
+      priority: 1, shedable: false, capacity: 400,
+      isGenerator: true
+    },
+    {
+      id: 'PV-003', name: '光伏阵列C', type: 'inverter', x: 750, y: 420,
+      priority: 1, shedable: false, capacity: 400,
+      isGenerator: true
+    },
+    {
+      id: 'PV-004', name: '光伏阵列D', type: 'inverter', x: 1050, y: 420,
+      priority: 1, shedable: false, capacity: 400,
+      isGenerator: true
+    },
+    {
+      id: 'LOAD-001', name: '中心医院', type: 'load', x: 200, y: 580,
+      priority: 10, shedable: false, capacity: 280,
+      description: '一级负荷，不可切除'
+    },
+    {
+      id: 'LOAD-002', name: '工业园区', type: 'load', x: 500, y: 580,
+      priority: 7, shedable: true, capacity: 360,
+      description: '二级负荷，延迟切除'
+    },
+    {
+      id: 'LOAD-003', name: '商业中心', type: 'load', x: 800, y: 580,
+      priority: 5, shedable: true, capacity: 250,
+      description: '三级负荷，优先切除'
+    },
+    {
+      id: 'LOAD-004', name: '景观照明', type: 'load', x: 1100, y: 580,
+      priority: 1, shedable: true, capacity: 120,
+      description: '非必要负荷，首切'
+    },
+    {
+      id: 'BATT-001', name: '储能站1', type: 'battery', x: 600, y: 420,
+      priority: 2, shedable: false, capacity: 500,
+      isGenerator: true, soc: 0.78
+    }
   ],
   links: [
     { source: 'GRID-001', target: 'SUB-001', capacity: 1000, direction: 'bidirectional' },

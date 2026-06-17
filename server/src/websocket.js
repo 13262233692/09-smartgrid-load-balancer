@@ -69,8 +69,25 @@ function broadcastFlowData(flowData) {
   })
 }
 
+function broadcastGuardianEvent(eventData) {
+  const message = JSON.stringify({
+    type: 'guardian',
+    data: eventData
+  })
+
+  clients.forEach((client) => {
+    if (client.readyState === 1) {
+      try {
+        client.send(message)
+      } catch (err) {
+        console.error('[WebSocket] 广播 Guardian 事件失败:', err.message)
+      }
+    }
+  })
+}
+
 function getClientCount() {
   return clients.size
 }
 
-export { initWebSocket, broadcastLoadRate, broadcastFlowData, getClientCount }
+export { initWebSocket, broadcastLoadRate, broadcastFlowData, broadcastGuardianEvent, getClientCount }
